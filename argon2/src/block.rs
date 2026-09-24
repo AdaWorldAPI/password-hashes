@@ -112,6 +112,82 @@ impl Block {
         q ^= &r;
         q
     }
+
+    /// Vertical-lane variant of [`Block::compress`] over `ndarray::simd::U64x8`.
+    ///
+    /// Each of the two passes runs eight *independent* permutations (one per
+    /// row, then one per column pair), so lane `i` of every vector carries
+    /// permutation `i` and the eight `G` rounds of a pass execute as one. The
+    /// result is bit-identical to [`Block::compress`]; the backend (AVX-512,
+    /// AVX2, NEON, wasm-simd128 or scalar) is chosen at compile time by
+    /// `ndarray::simd`, so this crate carries no intrinsics and no `unsafe`.
+    ///
+    /// NOTE: do not call this directly. It should only be called via
+    /// `Argon2::compress`.
+    #[cfg(feature = "ndarray-simd")]
+    #[inline(always)]
+    pub(crate) fn compress_simd(rhs: &Self, lhs: &Self) -> Self {
+        use ndarray::simd::U64x8;
+
+        /// `a + b + 2 * lo32(a) * lo32(b)` in every lane (RFC 9106 `fBlaMka`).
+        #[inline(always)]
+        fn blamka(a: U64x8, b: U64x8) -> U64x8 {
+            let m = a.mul_lo32(b);
+            a + b + m + m
+        }
+
+        #[inline(always)]
+        fn g(v: &mut [U64x8; 16], a: usize, b: usize, c: usize, d: usize) {
+            v[a] = blamka(v[a], v[b]);
+            v[d] = (v[d] ^ v[a]).rotate_right(32);
+            v[c] = blamka(v[c], v[d]);
+            v[b] = (v[b] ^ v[c]).rotate_right(24);
+            v[a] = blamka(v[a], v[b]);
+            v[d] = (v[d] ^ v[a]).rotate_right(16);
+            v[c] = blamka(v[c], v[d]);
+            v[b] = (v[b] ^ v[c]).rotate_right(63);
+        }
+
+        #[inline(always)]
+        fn permute(v: &mut [U64x8; 16]) {
+            g(v, 0, 4, 8, 12);
+            g(v, 1, 5, 9, 13);
+            g(v, 2, 6, 10, 14);
+            g(v, 3, 7, 11, 15);
+            g(v, 0, 5, 10, 15);
+            g(v, 1, 6, 11, 12);
+            g(v, 2, 7, 8, 13);
+            g(v, 3, 4, 9, 14);
+        }
+
+        /// Runs one pass: word `k` of permutation `i` lives at `q[at(i, k)]`.
+        #[inline(always)]
+        fn pass(q: &mut [u64; 128], at: fn(usize, usize) -> usize) {
+            let mut v = [U64x8::splat(0); 16];
+            for (k, vk) in v.iter_mut().enumerate() {
+                let mut lanes = [0u64; 8];
+                for (i, lane) in lanes.iter_mut().enumerate() {
+                    *lane = q[at(i, k)];
+                }
+                *vk = U64x8::from_array(lanes);
+            }
+            permute(&mut v);
+            for (k, vk) in v.iter().enumerate() {
+                for (i, lane) in vk.to_array().into_iter().enumerate() {
+                    q[at(i, k)] = lane;
+                }
+            }
+        }
+
+        let r = *rhs ^ lhs;
+        let mut q = r;
+        // Row pass: permutation `i` is the 16 consecutive words of row `i`.
+        pass(&mut q.0, |i, k| 16 * i + k);
+        // Column pass: permutation `i` is column pair `2i, 2i + 1` of all rows.
+        pass(&mut q.0, |i, k| 2 * i + 16 * (k >> 1) + (k & 1));
+        q ^= &r;
+        q
+    }
 }
 
 impl Default for Block {
