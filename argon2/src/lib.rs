@@ -524,6 +524,14 @@ impl<'key> Argon2<'key> {
     }
 
     fn compress(&self, rhs: &Block, lhs: &Block) -> Block {
+        // The `ndarray-simd` backend dispatches at compile time inside
+        // `ndarray::simd`, so it needs no runtime CPU check here.
+        #[cfg(feature = "ndarray-simd")]
+        {
+            return Block::compress_simd(rhs, lhs);
+        }
+
+        #[cfg(not(feature = "ndarray-simd"))]
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             /// Enable AVX2 optimizations.
@@ -538,6 +546,7 @@ impl<'key> Argon2<'key> {
             }
         }
 
+        #[cfg(not(feature = "ndarray-simd"))]
         Block::compress(rhs, lhs)
     }
 
