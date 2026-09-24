@@ -26,9 +26,9 @@ rayon = { version = "1.7", optional = true }
 password-hash = { version = "0.6", optional = true, features = ["phc"] }
 zeroize = { version = "1", default-features = false, optional = true }
 # AdaWorldAPI: vertical `U64x8` compress (see `Block::compress_simd`). Off by
-# default, so the upstream build is unchanged. `mul_lo32` is on ndarray #331;
-# repoint this to `master` once that merges.
-ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "claude/u64x8-mul-lo32", default-features = false, features = ["std"], optional = true }
+# default, so the upstream build is unchanged. Needs `U64x8::mul_lo32`
+# (ndarray #331, merged).
+ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
 cpufeatures = "0.3"

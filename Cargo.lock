@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "ndarray"
 version = "0.17.2"
-source = "git+https://github.com/AdaWorldAPI/ndarray?branch=claude%2Fu64x8-mul-lo32#2cd424642481dd750c88b5a12f8184ed936109b4"
+source = "git+https://github.com/AdaWorldAPI/ndarray?branch=master#90cc821a241434cb1ec95ec03a033b1e5314cdff"
 dependencies = [
  "matrixmultiply",
  "num-complex",
