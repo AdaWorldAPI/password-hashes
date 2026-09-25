@@ -334,6 +334,9 @@ impl<'key> Argon2<'key> {
     /// filled memory is required. It is not necessary to call this method
     /// before calling any of the hashing functions.
     ///
+    /// The filled blocks are returned with their words in canonical RFC 9106
+    /// order, whatever layout the compression function worked in.
+    ///
     /// # Errors
     /// - Returns [`Error::PwdTooLong`] if `pwd` is longer than `MAX_PWD_LEN`.
     /// - Returns [`Error::SaltTooShort`] if `salt` is shorter than `MIN_SALT_LEN`.
@@ -347,7 +350,16 @@ impl<'key> Argon2<'key> {
         Self::verify_inputs(pwd, salt)?;
 
         let initial_hash = self.initial_hash(pwd, salt, &[]);
-        self.fill_blocks(memory_blocks.as_mut(), initial_hash)
+        self.fill_blocks(memory_blocks.as_mut(), initial_hash)?;
+        // Under `ndarray-simd` blocks are stored permuted (`Block::stored`);
+        // this is the one API that hands the filled blocks themselves back.
+        // Only the prefix `fill_blocks` filled: a surplus suffix the caller
+        // supplied was never touched and must stay exactly as it was.
+        let block_count = self.params.block_count();
+        for block in &mut memory_blocks.as_mut()[..block_count] {
+            block.canonicalize();
+        }
+        Ok(())
     }
 
     #[allow(clippy::cast_possible_truncation, unused_mut)]
@@ -432,17 +444,18 @@ impl<'key> Argon2<'key> {
                     0
                 };
 
-                let start_index = lane * lane_length + slice * segment_length + first_block;
+                let segment_start = lane * lane_length + slice * segment_length;
                 let mut prev_index = if slice == 0 && first_block == 0 {
                     // Last block in current lane
-                    start_index + lane_length - 1
+                    segment_start + lane_length - 1
                 } else {
                     // Previous block
-                    start_index - 1
+                    segment_start + first_block - 1
                 };
 
                 // Fill blocks in the segment
-                for (cur_index, block) in (start_index..).zip(first_block..segment_length) {
+                for block in first_block..segment_length {
+                    let cur_index = segment_start + block;
                     // Extract entropy
                     let rand = if data_independent_addressing {
                         let address_index = block % ADDRESSES_IN_BLOCK;
@@ -746,8 +759,8 @@ impl From<&Params> for Argon2<'_> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::{
-        Algorithm, Argon2, CustomizedPasswordHasher, Params, PasswordHasher, PasswordVerifier,
-        Version,
+        Algorithm, Argon2, Block, CustomizedPasswordHasher, Params, PasswordHasher,
+        PasswordVerifier, Version, blake2b_long::blake2b_long,
     };
 
     /// Example password only: don't use this as a real password!!!
@@ -755,6 +768,60 @@ mod tests {
 
     /// Example salt value. Don't use a static salt value!!!
     const EXAMPLE_SALT: &[u8] = b"example-salt";
+
+    /// FAILS IF: `fill_memory` returns blocks in the compression function's
+    /// storage layout instead of canonical word order. Block 0 is
+    /// H'(H0 || 0 || 0) and no pass rewrites it, so its bytes are recomputed
+    /// here without going through `Block` at all.
+    #[test]
+    fn fill_memory_returns_blocks_in_canonical_word_order() {
+        let argon2 = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(64, 1, 1, None).unwrap(),
+        );
+        let mut memory = [Block::default(); 64];
+        argon2
+            .fill_memory(EXAMPLE_PASSWORD, EXAMPLE_SALT, &mut memory)
+            .unwrap();
+
+        let h0 = argon2.initial_hash(EXAMPLE_PASSWORD, EXAMPLE_SALT, &[]);
+        let mut want = [0u8; Block::SIZE];
+        blake2b_long(
+            &[h0.as_ref(), &0u32.to_le_bytes(), &0u32.to_le_bytes()],
+            &mut want,
+        )
+        .unwrap();
+        let mut got = [0u8; Block::SIZE];
+        for (chunk, w) in got.chunks_mut(8).zip(memory[0].as_ref()) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        assert_eq!(got, want);
+    }
+
+    /// FAILS IF: `fill_memory` rewrites blocks past `block_count()`. A surplus
+    /// suffix is caller-owned data the algorithm never reads, so it must come
+    /// back byte-identical, even when its words are not symmetric under the
+    /// storage permutation.
+    #[test]
+    fn fill_memory_leaves_surplus_blocks_untouched() {
+        let argon2 = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(64, 1, 1, None).unwrap(),
+        );
+        let mut sentinel = Block::default();
+        for (i, w) in sentinel.as_mut().iter_mut().enumerate() {
+            *w = i as u64;
+        }
+        let mut memory = [sentinel; 72];
+        argon2
+            .fill_memory(EXAMPLE_PASSWORD, EXAMPLE_SALT, &mut memory)
+            .unwrap();
+        for block in &memory[64..] {
+            assert_eq!(block.as_ref(), sentinel.as_ref());
+        }
+    }
 
     #[test]
     fn decoded_salt_too_short() {

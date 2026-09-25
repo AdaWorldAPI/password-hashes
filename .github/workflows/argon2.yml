@@ -44,6 +44,9 @@ jobs:
     uses: RustCrypto/actions/.github/workflows/minimal-versions.yml@master
     with:
       working-directory: ${{ github.workflow }}
+      # The ndarray fork behind `ndarray-simd` declares `num-traits = "0.2"`, whose
+      # minimal version lacks `Float::copysign`; exclude it until the fork raises the floor.
+      stable-cmd: cargo hack check --release --feature-powerset --no-dev-deps --exclude-features ndarray-simd
 
   test:
     runs-on: ubuntu-latest
@@ -75,6 +78,25 @@ jobs:
       - run: cargo test --no-default-features --features kdf
       - run: cargo test --no-default-features --features password-hash
       - run: cargo test
+      # `ndarray-simd` needs rustc 1.98 (the AdaWorldAPI ndarray fork's MSRV);
+      # it is covered by the `ndarray-simd` job below.
+      - run: cargo test --features kdf,getrandom,parallel,password-hash,rand_core,zeroize
+
+  ndarray-simd:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - 1.98.1 # ndarray fork MSRV
+          - stable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: RustCrypto/actions/cargo-cache@master
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - run: cargo test --no-default-features --features ndarray-simd
+      - run: cargo test --features ndarray-simd
       - run: cargo test --all-features
 
   careful:
@@ -106,4 +128,5 @@ jobs:
           toolchain: ${{ matrix.rust }}
           targets: ${{ matrix.target }}
       - uses: RustCrypto/actions/cross-install@master
-      - run: cross test --release --target ${{ matrix.target }} --all-features
+      # powerpc has no 64-bit atomics, which the ndarray fork (`ndarray-simd`) needs.
+      - run: cross test --release --target ${{ matrix.target }} --features kdf,getrandom,parallel,password-hash,rand_core,zeroize
