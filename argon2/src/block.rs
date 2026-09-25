@@ -60,11 +60,36 @@ impl Block {
         Self([0u64; Self::SIZE / 8])
     }
 
-    /// Load a block from a block-sized byte slice
+    /// Storage index of canonical word `w` (`0..128`).
+    ///
+    /// Without `ndarray-simd` blocks are stored in canonical order and this is
+    /// the identity. With it, blocks are stored in the ROW layout
+    /// [`Block::compress_simd`] computes in: canonical word `16i + k` (row
+    /// `i`, word `k`) lives in vector `k`, lane `i`, i.e. at `8k + i`. The map
+    /// is a public compile-time permutation — it never depends on data, so it
+    /// adds no secret-dependent addressing — and it is what lets compress skip
+    /// the six transposes that only existed to restore canonical order. Every
+    /// read or write of a block's words BY INDEX must go through it; whole-
+    /// block operations (XOR, copy, compress) are layout-independent.
+    #[inline(always)]
+    pub(crate) const fn stored(w: usize) -> usize {
+        #[cfg(feature = "ndarray-simd")]
+        {
+            8 * (w % 16) + w / 16
+        }
+        #[cfg(not(feature = "ndarray-simd"))]
+        {
+            w
+        }
+    }
+
+    /// Load a block from a block-sized byte slice (canonical word order in
+    /// `input`, stored order in `self`; see [`Block::stored`]).
     #[inline(always)]
     pub(crate) fn load(&mut self, input: &[u8; Block::SIZE]) {
         for (i, chunk) in input.chunks(8).enumerate() {
-            self.0[i] = u64::from_le_bytes(chunk.try_into().expect("should be 8 bytes"));
+            self.0[Self::stored(i)] =
+                u64::from_le_bytes(chunk.try_into().expect("should be 8 bytes"));
         }
     }
 
@@ -113,27 +138,26 @@ impl Block {
         q
     }
 
-    /// Vertical-lane variant of [`Block::compress`] over `ndarray::simd::U64x8`.
+    /// Vertical-lane variant of [`Block::compress`] over `ndarray::simd::U64x8`,
+    /// on blocks kept in the stored ROW layout ([`Block::stored`]).
     ///
     /// Each of the two passes runs eight *independent* permutations (one per
     /// row, then one per column pair), so lane `i` of every vector carries
     /// permutation `i` and the eight `G` rounds of a pass execute as one. The
-    /// result is bit-identical to [`Block::compress`]; the backend (AVX-512,
-    /// AVX2, NEON, wasm-simd128 or scalar) is chosen at compile time by
-    /// `ndarray::simd`, so this crate carries no intrinsics and no `unsafe`.
+    /// backend (AVX-512, AVX2, NEON, wasm-simd128 or scalar) is chosen at
+    /// compile time by `ndarray::simd`, so this crate carries no intrinsics
+    /// and no `unsafe`.
     ///
-    /// The block stays in registers from load to store. Every change of lane
-    /// is a [`U64x8::transpose8`] of eight vectors:
+    /// Because blocks are STORED in the row layout, vector `k` of `rhs ^ lhs`
+    /// already is `v[k]` (lane `i` = canonical word `16i + k`): nothing moves
+    /// on load or store. The only lane changes are the row → column
+    /// rendezvous and its return, 2 [`U64x8::transpose8`] each — the ones the
+    /// algorithm itself requires (a column `G` reads words from four rows).
+    /// The diagonal `G` step of each pass is only a choice of registers.
     ///
-    /// - load: the block's 16 natural vectors (8 words each) become the row
-    ///   layout, `v[k]` lane `i` = word `16i + k` (2 transposes);
-    /// - row pass → column pass: `c[2r + b]` lane `i` = word `16r + 2i + b`,
-    ///   the one rendezvous the algorithm requires (2 transposes);
-    /// - store: back to row layout, then to natural order (4 transposes),
-    ///   because [`Block`] keeps its words in canonical order.
-    ///
-    /// The diagonal `G` step of each pass is only a choice of registers, so it
-    /// moves no data.
+    /// Equivalent to [`Block::compress`] conjugated by the storage map: for
+    /// canonical blocks `a`, `b`,
+    /// `compress_simd(S(a), S(b)) == S(compress(a, b))`.
     ///
     /// NOTE: do not call this directly. It should only be called via
     /// `Argon2::compress`.
@@ -181,35 +205,33 @@ impl Block {
         fn transpose_pairs(x: &[U64x8; 16]) -> [U64x8; 16] {
             let even = U64x8::transpose8(from_fn(|i| x[2 * i]));
             let odd = U64x8::transpose8(from_fn(|i| x[2 * i + 1]));
-            from_fn(|k| if k & 1 == 0 { even[k >> 1] } else { odd[k >> 1] })
+            from_fn(|k| {
+                if k & 1 == 0 {
+                    even[k >> 1]
+                } else {
+                    odd[k >> 1]
+                }
+            })
         }
 
-        /// Natural vector `m` of `R = rhs ^ lhs`: words `8m .. 8m + 8`.
-        let r = |m: usize| {
-            U64x8::from_slice(&rhs.0[8 * m..8 * m + 8]) ^ U64x8::from_slice(&lhs.0[8 * m..8 * m + 8])
-        };
-
-        // Row layout. Row `i` is natural vectors `2i` (words 0..8) and
-        // `2i + 1` (words 8..16), so `v[k]` lane `i` = word `16i + k`.
-        let lo = U64x8::transpose8(from_fn(|i| r(2 * i)));
-        let hi = U64x8::transpose8(from_fn(|i| r(2 * i + 1)));
-        let mut v: [U64x8; 16] = from_fn(|k| if k < 8 { lo[k] } else { hi[k - 8] });
+        // Row layout, straight from storage: `r[k]` lane `i` = word `16i + k`.
+        let r: [U64x8; 16] = from_fn(|k| {
+            U64x8::from_slice(&rhs.0[8 * k..8 * k + 8])
+                ^ U64x8::from_slice(&lhs.0[8 * k..8 * k + 8])
+        });
+        let mut v = r;
         permute(&mut v);
 
         // Column layout: `c[2r + b]` lane `i` = row `r`, word `2i + b`.
         let mut c = transpose_pairs(&v);
         permute(&mut c);
 
-        // Back to row layout (`transpose_pairs` is its own inverse), then to
-        // natural order, and add `R` back in.
+        // Back to the row layout (`transpose_pairs` is its own inverse) — which
+        // is also the storage layout — and add `R` back in.
         let v = transpose_pairs(&c);
-        let lo = U64x8::transpose8(from_fn(|k| v[k]));
-        let hi = U64x8::transpose8(from_fn(|k| v[k + 8]));
-
         let mut q = Self::new();
-        for i in 0..8 {
-            (lo[i] ^ r(2 * i)).copy_to_slice(&mut q.0[16 * i..16 * i + 8]);
-            (hi[i] ^ r(2 * i + 1)).copy_to_slice(&mut q.0[16 * i + 8..16 * i + 16]);
+        for k in 0..16 {
+            (v[k] ^ r[k]).copy_to_slice(&mut q.0[8 * k..8 * k + 8]);
         }
         q
     }
@@ -319,13 +341,36 @@ mod tests {
         b
     }
 
+    /// Canonical order -> stored order.
+    fn to_stored(b: &Block) -> Block {
+        let mut s = Block::new();
+        for w in 0..128 {
+            s.0[Block::stored(w)] = b.0[w];
+        }
+        s
+    }
+
     #[test]
-    fn compress_simd_matches_scalar() {
+    fn stored_is_a_permutation_that_fixes_word_zero() {
+        let mut seen = [false; 128];
+        for w in 0..128 {
+            let s = Block::stored(w);
+            assert!(!seen[s], "storage index {s} reused");
+            seen[s] = true;
+        }
+        assert_eq!(Block::stored(0), 0);
+        // Not the identity: a map that is the identity would make the
+        // conjugation test below vacuous.
+        assert_ne!(Block::stored(1), 1);
+    }
+
+    #[test]
+    fn compress_simd_is_scalar_compress_in_stored_order() {
         for seed in 0..64 {
             let (rhs, lhs) = (fill(2 * seed), fill(2 * seed + 1));
             assert_eq!(
-                Block::compress_simd(&rhs, &lhs).0,
-                Block::compress(&rhs, &lhs).0,
+                Block::compress_simd(&to_stored(&rhs), &to_stored(&lhs)).0,
+                to_stored(&Block::compress(&rhs, &lhs)).0,
                 "seed {seed}"
             );
         }
