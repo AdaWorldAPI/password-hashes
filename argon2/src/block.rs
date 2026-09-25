@@ -4,7 +4,6 @@ use core::{
     convert::{AsMut, AsRef},
     num::Wrapping,
     ops::{BitXor, BitXorAssign},
-    slice,
 };
 
 #[cfg(feature = "zeroize")]
@@ -319,7 +318,7 @@ impl Blocks {
 
     pub fn as_slice(&mut self) -> &mut [Block] {
         // SAFETY: `self.p` is a valid non-zero pointer that points to memory of the necessary size
-        unsafe { slice::from_raw_parts_mut(self.p.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.p.as_ptr(), self.len) }
     }
 }
 
