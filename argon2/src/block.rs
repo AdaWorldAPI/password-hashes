@@ -5,8 +5,10 @@ use core::num::Wrapping;
 use core::{
     convert::{AsMut, AsRef},
     ops::{BitXor, BitXorAssign},
-    slice,
 };
+
+#[cfg(feature = "alloc")]
+use core::slice;
 
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
