@@ -353,7 +353,10 @@ impl<'key> Argon2<'key> {
         self.fill_blocks(memory_blocks.as_mut(), initial_hash)?;
         // Under `ndarray-simd` blocks are stored permuted (`Block::stored`);
         // this is the one API that hands the filled blocks themselves back.
-        for block in memory_blocks.as_mut() {
+        // Only the prefix `fill_blocks` filled: a surplus suffix the caller
+        // supplied was never touched and must stay exactly as it was.
+        let block_count = self.params.block_count();
+        for block in &mut memory_blocks.as_mut()[..block_count] {
             block.canonicalize();
         }
         Ok(())
@@ -794,6 +797,30 @@ mod tests {
             chunk.copy_from_slice(&w.to_le_bytes());
         }
         assert_eq!(got, want);
+    }
+
+    /// FAILS IF: `fill_memory` rewrites blocks past `block_count()`. A surplus
+    /// suffix is caller-owned data the algorithm never reads, so it must come
+    /// back byte-identical, even when its words are not symmetric under the
+    /// storage permutation.
+    #[test]
+    fn fill_memory_leaves_surplus_blocks_untouched() {
+        let argon2 = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(64, 1, 1, None).unwrap(),
+        );
+        let mut sentinel = Block::default();
+        for (i, w) in sentinel.as_mut().iter_mut().enumerate() {
+            *w = i as u64;
+        }
+        let mut memory = [sentinel; 72];
+        argon2
+            .fill_memory(EXAMPLE_PASSWORD, EXAMPLE_SALT, &mut memory)
+            .unwrap();
+        for block in &memory[64..] {
+            assert_eq!(block.as_ref(), sentinel.as_ref());
+        }
     }
 
     #[test]
