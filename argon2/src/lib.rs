@@ -383,12 +383,6 @@ impl<'key> Argon2<'key> {
                 let mut hash = [0u8; Block::SIZE];
                 blake2b_long(inputs, &mut hash)?;
                 block.load(&hash);
-                // With `ndarray-simd`, memory blocks are kept in the folded
-                // word order `Block::compress_folded` reads and writes.
-                #[cfg(feature = "ndarray-simd")]
-                {
-                    *block = block.fold();
-                }
             }
         }
 
@@ -538,7 +532,7 @@ impl<'key> Argon2<'key> {
         // `ndarray::simd`, so it needs no runtime CPU check here.
         #[cfg(feature = "ndarray-simd")]
         {
-            return Block::compress_folded(rhs, lhs);
+            return Block::compress_simd(rhs, lhs);
         }
 
         #[cfg(not(feature = "ndarray-simd"))]
@@ -575,12 +569,6 @@ impl<'key> Argon2<'key> {
         for l in 1..self.params.lanes() {
             let last_block_in_lane = l * lane_length + (lane_length - 1);
             blockhash ^= &memory_blocks[last_block_in_lane];
-        }
-
-        // Back to canonical word order before the words become bytes.
-        #[cfg(feature = "ndarray-simd")]
-        {
-            blockhash = blockhash.unfold();
         }
 
         // Hash the result
