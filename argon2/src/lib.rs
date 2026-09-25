@@ -428,17 +428,17 @@ impl<'key> Argon2<'key> {
                     0
                 };
 
-                let mut cur_index = lane * lane_length + slice * segment_length + first_block;
+                let start_index = lane * lane_length + slice * segment_length + first_block;
                 let mut prev_index = if slice == 0 && first_block == 0 {
                     // Last block in current lane
-                    cur_index + lane_length - 1
+                    start_index + lane_length - 1
                 } else {
                     // Previous block
-                    cur_index - 1
+                    start_index - 1
                 };
 
                 // Fill blocks in the segment
-                for block in first_block..segment_length {
+                for (cur_index, block) in (start_index..).zip(first_block..segment_length) {
                     // Extract entropy
                     let rand = if data_independent_addressing {
                         let address_index = block % ADDRESSES_IN_BLOCK;
@@ -515,7 +515,6 @@ impl<'key> Argon2<'key> {
                     };
 
                     prev_index = cur_index;
-                    cur_index += 1;
                 }
             });
         }
@@ -528,7 +527,7 @@ impl<'key> Argon2<'key> {
         // `ndarray::simd`, so it needs no runtime CPU check here.
         #[cfg(feature = "ndarray-simd")]
         {
-            return Block::compress_simd(rhs, lhs);
+            Block::compress_simd(rhs, lhs)
         }
 
         #[cfg(not(feature = "ndarray-simd"))]

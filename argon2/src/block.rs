@@ -1,8 +1,9 @@
 //! Argon2 memory block functions
 
+#[cfg(any(not(feature = "ndarray-simd"), test))]
+use core::num::Wrapping;
 use core::{
     convert::{AsMut, AsRef},
-    num::Wrapping,
     ops::{BitXor, BitXorAssign},
     slice,
 };
@@ -10,8 +11,10 @@ use core::{
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
+#[cfg(any(not(feature = "ndarray-simd"), test))]
 const TRUNC: u64 = u32::MAX as u64;
 
+#[cfg(any(not(feature = "ndarray-simd"), test))]
 #[rustfmt::skip]
 macro_rules! permute_step {
     ($a:expr, $b:expr, $c:expr, $d:expr) => {
@@ -27,6 +30,7 @@ macro_rules! permute_step {
     };
 }
 
+#[cfg(any(not(feature = "ndarray-simd"), test))]
 macro_rules! permute {
     (
         $v0:expr, $v1:expr, $v2:expr, $v3:expr,
@@ -76,13 +80,14 @@ impl Block {
 
     /// NOTE: do not call this directly. It should only be called via
     /// `Argon2::compress`.
+    #[cfg(any(not(feature = "ndarray-simd"), test))]
     #[inline(always)]
     pub(crate) fn compress(rhs: &Self, lhs: &Self) -> Self {
         let r = *rhs ^ lhs;
 
         // Apply permutations rowwise
         let mut q = r;
-        for chunk in q.0.chunks_exact_mut(16) {
+        for chunk in q.0.as_chunks_mut::<16>().0 {
             #[rustfmt::skip]
             permute!(
                 chunk[0], chunk[1], chunk[2], chunk[3],
@@ -181,12 +186,19 @@ impl Block {
         fn transpose_pairs(x: &[U64x8; 16]) -> [U64x8; 16] {
             let even = U64x8::transpose8(from_fn(|i| x[2 * i]));
             let odd = U64x8::transpose8(from_fn(|i| x[2 * i + 1]));
-            from_fn(|k| if k & 1 == 0 { even[k >> 1] } else { odd[k >> 1] })
+            from_fn(|k| {
+                if k & 1 == 0 {
+                    even[k >> 1]
+                } else {
+                    odd[k >> 1]
+                }
+            })
         }
 
-        /// Natural vector `m` of `R = rhs ^ lhs`: words `8m .. 8m + 8`.
+        // Natural vector `m` of `R = rhs ^ lhs`: words `8m .. 8m + 8`.
         let r = |m: usize| {
-            U64x8::from_slice(&rhs.0[8 * m..8 * m + 8]) ^ U64x8::from_slice(&lhs.0[8 * m..8 * m + 8])
+            U64x8::from_slice(&rhs.0[8 * m..8 * m + 8])
+                ^ U64x8::from_slice(&lhs.0[8 * m..8 * m + 8])
         };
 
         // Row layout. Row `i` is natural vectors `2i` (words 0..8) and
@@ -305,7 +317,7 @@ impl Drop for Blocks {
 mod tests {
     use super::Block;
 
-    /// SplitMix64, so the test needs no RNG dependency.
+    /// `SplitMix64`, so the test needs no RNG dependency.
     fn fill(seed: u64) -> Block {
         let mut s = seed;
         let mut b = Block::new();
