@@ -97,12 +97,6 @@ impl Block {
         }
     }
 
-    /// Iterate over the `u64` values contained in this block
-    #[inline(always)]
-    pub(crate) fn iter(&self) -> slice::Iter<'_, u64> {
-        self.0.iter()
-    }
-
     /// NOTE: do not call this directly. It should only be called via
     /// `Argon2::compress`.
     #[cfg(any(not(feature = "ndarray-simd"), test))]
