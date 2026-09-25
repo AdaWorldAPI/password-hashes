@@ -444,17 +444,18 @@ impl<'key> Argon2<'key> {
                     0
                 };
 
-                let mut cur_index = lane * lane_length + slice * segment_length + first_block;
+                let segment_start = lane * lane_length + slice * segment_length;
                 let mut prev_index = if slice == 0 && first_block == 0 {
                     // Last block in current lane
-                    cur_index + lane_length - 1
+                    segment_start + lane_length - 1
                 } else {
                     // Previous block
-                    cur_index - 1
+                    segment_start + first_block - 1
                 };
 
                 // Fill blocks in the segment
                 for block in first_block..segment_length {
+                    let cur_index = segment_start + block;
                     // Extract entropy
                     let rand = if data_independent_addressing {
                         let address_index = block % ADDRESSES_IN_BLOCK;
@@ -531,7 +532,6 @@ impl<'key> Argon2<'key> {
                     };
 
                     prev_index = cur_index;
-                    cur_index += 1;
                 }
             });
         }
