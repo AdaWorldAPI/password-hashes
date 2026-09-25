@@ -408,18 +408,17 @@ impl<'key> Argon2<'key> {
                 let zero_block = Block::default();
 
                 if data_independent_addressing {
-                    for (w, x) in [
+                    // Write each canonical word individually: storage order may be permuted.
+                    let values: [u64; 6] = [
                         pass as u64,
                         lane as u64,
                         slice as u64,
                         block_count as u64,
                         iterations as u64,
                         self.algorithm as u64,
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        *input_block.word_mut(w) = x;
+                    ];
+                    for (j, v) in values.into_iter().enumerate() {
+                        input_block.as_mut()[Block::stored(j)] = v;
                     }
                 }
 
@@ -462,9 +461,9 @@ impl<'key> Argon2<'key> {
                             );
                         }
 
-                        address_block.word(address_index)
+                        address_block.as_ref()[Block::stored(address_index)]
                     } else {
-                        memory_view.get_block(prev_index).word(0)
+                        memory_view.get_block(prev_index).as_ref()[Block::stored(0)]
                     };
 
                     // Calculate source block index for compress function
@@ -587,8 +586,10 @@ impl<'key> Argon2<'key> {
         // Hash the result
         let mut blockhash_bytes = [0u8; Block::SIZE];
 
-        for (chunk, v) in blockhash_bytes.chunks_mut(8).zip(blockhash.iter()) {
-            chunk.copy_from_slice(&v.to_le_bytes());
+        // Word order is mapped through `Block::stored` because storage order may be
+        // permuted; the output bytes must reflect canonical word order regardless.
+        for (w, chunk) in blockhash_bytes.chunks_mut(8).enumerate() {
+            chunk.copy_from_slice(&blockhash.as_ref()[Block::stored(w)].to_le_bytes());
         }
 
         blake2b_long(&[&blockhash_bytes], out)?;
@@ -608,7 +609,7 @@ impl<'key> Argon2<'key> {
         input_block: &mut Block,
         zero_block: &Block,
     ) {
-        *input_block.word_mut(6) += 1;
+        input_block.as_mut()[Block::stored(6)] += 1;
         *address_block = self.compress(zero_block, input_block);
         *address_block = self.compress(zero_block, address_block);
     }
