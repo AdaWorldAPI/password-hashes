@@ -190,7 +190,10 @@ pub(crate) const SYNC_POINTS: usize = 4;
 /// To generate reference block positions
 const ADDRESSES_IN_BLOCK: usize = 128;
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    not(feature = "ndarray-simd")
+))]
 cpufeatures::new!(avx2_cpuid, "avx2");
 
 /// Argon2 context.
@@ -215,7 +218,10 @@ pub struct Argon2<'key> {
     /// Key array
     secret: Option<&'key [u8]>,
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        not(feature = "ndarray-simd")
+    ))]
     cpu_feat_avx2: avx2_cpuid::InitToken,
 }
 
@@ -244,7 +250,10 @@ impl<'key> Argon2<'key> {
             version,
             params,
             secret: None,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(all(
+                any(target_arch = "x86", target_arch = "x86_64"),
+                not(feature = "ndarray-simd")
+            ))]
             cpu_feat_avx2: avx2_cpuid::init(),
         }
     }
@@ -268,7 +277,10 @@ impl<'key> Argon2<'key> {
             version,
             params,
             secret: Some(secret),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(all(
+                any(target_arch = "x86", target_arch = "x86_64"),
+                not(feature = "ndarray-simd")
+            ))]
             cpu_feat_avx2: avx2_cpuid::init(),
         })
     }
@@ -697,7 +709,10 @@ impl CustomizedPasswordHasher<PasswordHash> for Argon2<'_> {
             algorithm,
             version,
             params,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            #[cfg(all(
+                any(target_arch = "x86", target_arch = "x86_64"),
+                not(feature = "ndarray-simd")
+            ))]
             cpu_feat_avx2: self.cpu_feat_avx2,
         }
         .hash_password_with_salt(password, salt)
