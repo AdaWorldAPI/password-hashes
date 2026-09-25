@@ -334,6 +334,9 @@ impl<'key> Argon2<'key> {
     /// filled memory is required. It is not necessary to call this method
     /// before calling any of the hashing functions.
     ///
+    /// The filled blocks are returned with their words in canonical RFC 9106
+    /// order, whatever layout the compression function worked in.
+    ///
     /// # Errors
     /// - Returns [`Error::PwdTooLong`] if `pwd` is longer than `MAX_PWD_LEN`.
     /// - Returns [`Error::SaltTooShort`] if `salt` is shorter than `MIN_SALT_LEN`.
@@ -347,7 +350,13 @@ impl<'key> Argon2<'key> {
         Self::verify_inputs(pwd, salt)?;
 
         let initial_hash = self.initial_hash(pwd, salt, &[]);
-        self.fill_blocks(memory_blocks.as_mut(), initial_hash)
+        self.fill_blocks(memory_blocks.as_mut(), initial_hash)?;
+        // Under `ndarray-simd` blocks are stored permuted (`Block::stored`);
+        // this is the one API that hands the filled blocks themselves back.
+        for block in memory_blocks.as_mut() {
+            block.to_canonical_order();
+        }
+        Ok(())
     }
 
     #[allow(clippy::cast_possible_truncation, unused_mut)]
@@ -747,8 +756,8 @@ impl From<&Params> for Argon2<'_> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use crate::{
-        Algorithm, Argon2, CustomizedPasswordHasher, Params, PasswordHasher, PasswordVerifier,
-        Version,
+        Algorithm, Argon2, Block, CustomizedPasswordHasher, Params, PasswordHasher,
+        PasswordVerifier, Version, blake2b_long::blake2b_long,
     };
 
     /// Example password only: don't use this as a real password!!!
@@ -756,6 +765,36 @@ mod tests {
 
     /// Example salt value. Don't use a static salt value!!!
     const EXAMPLE_SALT: &[u8] = b"example-salt";
+
+    /// FAILS IF: `fill_memory` returns blocks in the compression function's
+    /// storage layout instead of canonical word order. Block 0 is
+    /// H'(H0 || 0 || 0) and no pass rewrites it, so its bytes are recomputed
+    /// here without going through `Block` at all.
+    #[test]
+    fn fill_memory_returns_blocks_in_canonical_word_order() {
+        let argon2 = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(64, 1, 1, None).unwrap(),
+        );
+        let mut memory = [Block::default(); 64];
+        argon2
+            .fill_memory(EXAMPLE_PASSWORD, EXAMPLE_SALT, &mut memory)
+            .unwrap();
+
+        let h0 = argon2.initial_hash(EXAMPLE_PASSWORD, EXAMPLE_SALT, &[]);
+        let mut want = [0u8; Block::SIZE];
+        blake2b_long(
+            &[h0.as_ref(), &0u32.to_le_bytes(), &0u32.to_le_bytes()],
+            &mut want,
+        )
+        .unwrap();
+        let mut got = [0u8; Block::SIZE];
+        for (chunk, w) in got.chunks_mut(8).zip(memory[0].as_ref()) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        assert_eq!(got, want);
+    }
 
     #[test]
     fn decoded_salt_too_short() {

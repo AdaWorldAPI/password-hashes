@@ -83,6 +83,21 @@ impl Block {
         }
     }
 
+    /// Rewrite this block's words from storage order ([`Block::stored`]) into
+    /// canonical RFC 9106 word order, for a block about to leave the crate
+    /// through a public API. A no-op without `ndarray-simd`, where the two
+    /// orders coincide.
+    #[inline]
+    pub(crate) fn to_canonical_order(&mut self) {
+        #[cfg(feature = "ndarray-simd")]
+        {
+            let stored = self.0;
+            for w in 0..Self::SIZE / 8 {
+                self.0[w] = stored[Self::stored(w)];
+            }
+        }
+    }
+
     /// Load a block from a block-sized byte slice (canonical word order in
     /// `input`, stored order in `self`; see [`Block::stored`]).
     #[inline(always)]
