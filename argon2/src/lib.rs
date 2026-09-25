@@ -465,26 +465,9 @@ impl<'key> Argon2<'key> {
                     segment_start + first_block - 1
                 };
 
-                // Fill blocks in the segment
-                for block in first_block..segment_length {
-                    let cur_index = segment_start + block;
-                    // Extract entropy
-                    let rand = if data_independent_addressing {
-                        let address_index = block % ADDRESSES_IN_BLOCK;
-
-                        if address_index == 0 {
-                            self.update_address_block(
-                                &mut address_block,
-                                &mut input_block,
-                                &zero_block,
-                            );
-                        }
-
-                        address_block.as_ref()[Block::stored(address_index)]
-                    } else {
-                        memory_view.get_block(prev_index).as_ref()[Block::stored(0)]
-                    };
-
+                // Reference-block index for `block` given its pseudo-random word
+                // (RFC 9106 §3.4.1.2). One formula, shared by the fill and the prefetch.
+                let ref_index_of = |block: usize, rand: u64| -> usize {
                     // Calculate source block index for compress function
                     let ref_lane = if pass == 0 && slice == 0 {
                         // Cannot reference other lanes yet
@@ -529,7 +512,52 @@ impl<'key> Argon2<'key> {
                     };
 
                     let lane_index = (start_position + relative_position) % lane_length;
-                    let ref_index = ref_lane * lane_length + lane_index;
+                    ref_lane * lane_length + lane_index
+                };
+
+                // Fill blocks in the segment
+                for block in first_block..segment_length {
+                    let cur_index = segment_start + block;
+                    // Extract entropy
+                    let rand = if data_independent_addressing {
+                        let address_index = block % ADDRESSES_IN_BLOCK;
+
+                        if address_index == 0 {
+                            self.update_address_block(
+                                &mut address_block,
+                                &mut input_block,
+                                &zero_block,
+                            );
+                        }
+
+                        address_block.as_ref()[Block::stored(address_index)]
+                    } else {
+                        memory_view.get_block(prev_index).as_ref()[Block::stored(0)]
+                    };
+
+                    let ref_index = ref_index_of(block, rand);
+
+                    // Mississippi Queen: with data-independent addressing the
+                    // next reference is already in `address_block`, so lay the
+                    // next tile down while this `compress` runs. The index is
+                    // computed by the same formula the next iteration uses, so
+                    // this is only a hint and never changes the result.
+                    #[cfg(feature = "ndarray-simd")]
+                    if data_independent_addressing {
+                        let next = block + 1;
+                        if next < segment_length && next % ADDRESSES_IN_BLOCK != 0 {
+                            let next_rand =
+                                address_block.as_ref()[Block::stored(next % ADDRESSES_IN_BLOCK)];
+                            let next_ref = ref_index_of(next, next_rand);
+                            let ptr =
+                                core::ptr::from_ref(memory_view.get_block(next_ref)).cast::<u8>();
+                            for line in (0..Block::SIZE).step_by(64) {
+                                // SAFETY: `ptr` points at a live 1 KiB block and
+                                // `line < Block::SIZE`; prefetch never faults.
+                                ndarray::simd::prefetch_read_t0(unsafe { ptr.add(line) });
+                            }
+                        }
+                    }
 
                     // Calculate new block
                     let result = self.compress(
