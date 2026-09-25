@@ -383,6 +383,12 @@ impl<'key> Argon2<'key> {
                 let mut hash = [0u8; Block::SIZE];
                 blake2b_long(inputs, &mut hash)?;
                 block.load(&hash);
+                // With `ndarray-simd`, memory blocks are kept in the folded
+                // word order `Block::compress_folded` reads and writes.
+                #[cfg(feature = "ndarray-simd")]
+                {
+                    *block = block.fold();
+                }
             }
         }
 
@@ -402,14 +408,19 @@ impl<'key> Argon2<'key> {
                 let zero_block = Block::default();
 
                 if data_independent_addressing {
-                    input_block.as_mut()[..6].copy_from_slice(&[
+                    for (w, x) in [
                         pass as u64,
                         lane as u64,
                         slice as u64,
                         block_count as u64,
                         iterations as u64,
                         self.algorithm as u64,
-                    ]);
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        *input_block.word_mut(w) = x;
+                    }
                 }
 
                 let first_block = if pass == 0 && slice == 0 {
@@ -451,9 +462,9 @@ impl<'key> Argon2<'key> {
                             );
                         }
 
-                        address_block.as_ref()[address_index]
+                        address_block.word(address_index)
                     } else {
-                        memory_view.get_block(prev_index).as_ref()[0]
+                        memory_view.get_block(prev_index).word(0)
                     };
 
                     // Calculate source block index for compress function
@@ -528,7 +539,7 @@ impl<'key> Argon2<'key> {
         // `ndarray::simd`, so it needs no runtime CPU check here.
         #[cfg(feature = "ndarray-simd")]
         {
-            return Block::compress_simd(rhs, lhs);
+            return Block::compress_folded(rhs, lhs);
         }
 
         #[cfg(not(feature = "ndarray-simd"))]
@@ -567,6 +578,12 @@ impl<'key> Argon2<'key> {
             blockhash ^= &memory_blocks[last_block_in_lane];
         }
 
+        // Back to canonical word order before the words become bytes.
+        #[cfg(feature = "ndarray-simd")]
+        {
+            blockhash = blockhash.unfold();
+        }
+
         // Hash the result
         let mut blockhash_bytes = [0u8; Block::SIZE];
 
@@ -591,7 +608,7 @@ impl<'key> Argon2<'key> {
         input_block: &mut Block,
         zero_block: &Block,
     ) {
-        input_block.as_mut()[6] += 1;
+        *input_block.word_mut(6) += 1;
         *address_block = self.compress(zero_block, input_block);
         *address_block = self.compress(zero_block, address_block);
     }

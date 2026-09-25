@@ -113,105 +113,172 @@ impl Block {
         q
     }
 
-    /// Vertical-lane variant of [`Block::compress`] over `ndarray::simd::U64x8`.
+    /// Folded-layout variant of [`Block::compress`] over `ndarray::simd::U64x8`.
     ///
-    /// Each of the two passes runs eight *independent* permutations (one per
-    /// row, then one per column pair), so lane `i` of every vector carries
-    /// permutation `i` and the eight `G` rounds of a pass execute as one. The
-    /// result is bit-identical to [`Block::compress`]; the backend (AVX-512,
-    /// AVX2, NEON, wasm-simd128 or scalar) is chosen at compile time by
-    /// `ndarray::simd`, so this crate carries no intrinsics and no `unsafe`.
+    /// Inputs and output are in the *folded* word order (see [`fold_index`]):
+    /// storage vector `m` (words `8m .. 8m + 8`) holds the column-pass lanes
+    /// `c[m]`, i.e. lane `i` of `c[2r + b]` is canonical word `16r + 2i + b`.
+    /// Every block `fill_blocks` touches stays in that order from one call to
+    /// the next, so the canonical order is never materialized between calls:
     ///
-    /// The block stays in registers from load to store. Every change of lane
-    /// is a [`U64x8::transpose8`] of eight vectors:
+    /// - load: the 16 storage vectors *are* the column layout (0 transposes);
+    /// - column → row layout for the row pass (2 transposes);
+    /// - row → column layout, the rendezvous the algorithm requires
+    ///   (2 transposes);
+    /// - store: the column-pass result is already in storage order
+    ///   (0 transposes).
     ///
-    /// - load: the block's 16 natural vectors (8 words each) become the row
-    ///   layout, `v[k]` lane `i` = word `16i + k` (2 transposes);
-    /// - row pass → column pass: `c[2r + b]` lane `i` = word `16r + 2i + b`,
-    ///   the one rendezvous the algorithm requires (2 transposes);
-    /// - store: back to row layout, then to natural order (4 transposes),
-    ///   because [`Block`] keeps its words in canonical order.
-    ///
-    /// The diagonal `G` step of each pass is only a choice of registers, so it
-    /// moves no data.
+    /// 4 transposes per call, against 8 when blocks are kept canonical. Each
+    /// pass runs eight independent permutations, lane `i` carrying
+    /// permutation `i`; the diagonal `G` step is only a choice of registers.
+    /// The result is bit-identical to [`Block::compress`] under the fold; the
+    /// backend is chosen at compile time by `ndarray::simd`, so this crate
+    /// carries no intrinsics and no `unsafe`.
     ///
     /// NOTE: do not call this directly. It should only be called via
     /// `Argon2::compress`.
     #[cfg(feature = "ndarray-simd")]
     #[inline(always)]
-    pub(crate) fn compress_simd(rhs: &Self, lhs: &Self) -> Self {
-        use core::array::from_fn;
-        use ndarray::simd::U64x8;
+    pub(crate) fn compress_folded(rhs: &Self, lhs: &Self) -> Self {
+        use lanes::{U64x8, permute, transpose_pairs};
 
-        /// `a + b + 2 * lo32(a) * lo32(b)` in every lane (RFC 9106 `fBlaMka`).
-        #[inline(always)]
-        fn blamka(a: U64x8, b: U64x8) -> U64x8 {
-            let m = a.mul_lo32(b);
-            a + b + m + m
+        // `R = rhs ^ lhs`, one storage chunk per vector: already `c[m]`.
+        let mut r = [U64x8::splat(0); 16];
+        for ((rv, a), b) in r
+            .iter_mut()
+            .zip(rhs.0.chunks_exact(8))
+            .zip(lhs.0.chunks_exact(8))
+        {
+            *rv = U64x8::from_slice(a) ^ U64x8::from_slice(b);
         }
 
-        #[inline(always)]
-        fn g(v: &mut [U64x8; 16], a: usize, b: usize, c: usize, d: usize) {
-            v[a] = blamka(v[a], v[b]);
-            v[d] = (v[d] ^ v[a]).rotate_right(32);
-            v[c] = blamka(v[c], v[d]);
-            v[b] = (v[b] ^ v[c]).rotate_right(24);
-            v[a] = blamka(v[a], v[b]);
-            v[d] = (v[d] ^ v[a]).rotate_right(16);
-            v[c] = blamka(v[c], v[d]);
-            v[b] = (v[b] ^ v[c]).rotate_right(63);
-        }
-
-        #[inline(always)]
-        fn permute(v: &mut [U64x8; 16]) {
-            g(v, 0, 4, 8, 12);
-            g(v, 1, 5, 9, 13);
-            g(v, 2, 6, 10, 14);
-            g(v, 3, 7, 11, 15);
-            g(v, 0, 5, 10, 15);
-            g(v, 1, 6, 11, 12);
-            g(v, 2, 7, 8, 13);
-            g(v, 3, 4, 9, 14);
-        }
-
-        /// Transposes the even-indexed and the odd-indexed halves of `x`
-        /// separately and interleaves the results again: `y[2j + b]` lane `i`
-        /// is `x[2i + b]` lane `j`.
-        #[inline(always)]
-        fn transpose_pairs(x: &[U64x8; 16]) -> [U64x8; 16] {
-            let even = U64x8::transpose8(from_fn(|i| x[2 * i]));
-            let odd = U64x8::transpose8(from_fn(|i| x[2 * i + 1]));
-            from_fn(|k| if k & 1 == 0 { even[k >> 1] } else { odd[k >> 1] })
-        }
-
-        /// Natural vector `m` of `R = rhs ^ lhs`: words `8m .. 8m + 8`.
-        let r = |m: usize| {
-            U64x8::from_slice(&rhs.0[8 * m..8 * m + 8]) ^ U64x8::from_slice(&lhs.0[8 * m..8 * m + 8])
-        };
-
-        // Row layout. Row `i` is natural vectors `2i` (words 0..8) and
-        // `2i + 1` (words 8..16), so `v[k]` lane `i` = word `16i + k`.
-        let lo = U64x8::transpose8(from_fn(|i| r(2 * i)));
-        let hi = U64x8::transpose8(from_fn(|i| r(2 * i + 1)));
-        let mut v: [U64x8; 16] = from_fn(|k| if k < 8 { lo[k] } else { hi[k - 8] });
+        // Row layout: `v[k]` lane `i` = canonical word `16i + k`.
+        let mut v = transpose_pairs(&r);
         permute(&mut v);
 
-        // Column layout: `c[2r + b]` lane `i` = row `r`, word `2i + b`.
+        // Column layout again: `c[2r + b]` lane `i` = word `16r + 2i + b`.
         let mut c = transpose_pairs(&v);
         permute(&mut c);
 
-        // Back to row layout (`transpose_pairs` is its own inverse), then to
-        // natural order, and add `R` back in.
-        let v = transpose_pairs(&c);
-        let lo = U64x8::transpose8(from_fn(|k| v[k]));
-        let hi = U64x8::transpose8(from_fn(|k| v[k + 8]));
-
         let mut q = Self::new();
-        for i in 0..8 {
-            (lo[i] ^ r(2 * i)).copy_to_slice(&mut q.0[16 * i..16 * i + 8]);
-            (hi[i] ^ r(2 * i + 1)).copy_to_slice(&mut q.0[16 * i + 8..16 * i + 16]);
+        for (m, out) in q.0.chunks_exact_mut(8).enumerate() {
+            (c[m] ^ r[m]).copy_to_slice(out);
         }
         q
+    }
+
+    /// This block's canonical words reordered into the folded layout.
+    #[cfg(feature = "ndarray-simd")]
+    pub(crate) fn fold(&self) -> Self {
+        let mut out = Self::new();
+        for (w, &x) in self.0.iter().enumerate() {
+            out.0[fold_index(w)] = x;
+        }
+        out
+    }
+
+    /// Inverse of [`Block::fold`]: folded storage back to canonical order.
+    #[cfg(feature = "ndarray-simd")]
+    pub(crate) fn unfold(&self) -> Self {
+        let mut out = Self::new();
+        for (w, x) in out.0.iter_mut().enumerate() {
+            *x = self.0[fold_index(w)];
+        }
+        out
+    }
+
+    /// Canonical word `w` of this block, whatever the storage order.
+    #[inline(always)]
+    pub(crate) fn word(&self, w: usize) -> u64 {
+        self.0[storage_index(w)]
+    }
+
+    /// Mutable canonical word `w` of this block, whatever the storage order.
+    #[inline(always)]
+    pub(crate) fn word_mut(&mut self, w: usize) -> &mut u64 {
+        &mut self.0[storage_index(w)]
+    }
+}
+
+/// Storage index of canonical word `w` in the folded layout used by
+/// [`Block::compress_folded`]: with `w = 16r + 2i + b` (`r` the row, `i` the
+/// column pair, `b` the side of the pair), the word sits at lane `i` of
+/// storage vector `2r + b`, i.e. index `8(2r + b) + i`.
+///
+/// Word 0 maps to 0, so the data-dependent addressing read of `prev[0]` is
+/// the same in both orders.
+#[cfg(feature = "ndarray-simd")]
+pub(crate) const fn fold_index(w: usize) -> usize {
+    let r = w >> 4;
+    let j = w & 15;
+    ((2 * r + (j & 1)) << 3) | (j >> 1)
+}
+
+#[cfg(feature = "ndarray-simd")]
+#[inline(always)]
+const fn storage_index(w: usize) -> usize {
+    fold_index(w)
+}
+
+#[cfg(not(feature = "ndarray-simd"))]
+#[inline(always)]
+const fn storage_index(w: usize) -> usize {
+    w
+}
+
+/// The lane round shared by the SIMD compression function.
+#[cfg(feature = "ndarray-simd")]
+mod lanes {
+    use core::array::from_fn;
+    pub(super) use ndarray::simd::U64x8;
+
+    /// `a + b + 2 * lo32(a) * lo32(b)` in every lane (RFC 9106 `fBlaMka`).
+    #[inline(always)]
+    fn blamka(a: U64x8, b: U64x8) -> U64x8 {
+        let m = a.mul_lo32(b);
+        a + b + m + m
+    }
+
+    #[inline(always)]
+    fn g(v: &mut [U64x8; 16], a: usize, b: usize, c: usize, d: usize) {
+        v[a] = blamka(v[a], v[b]);
+        v[d] = (v[d] ^ v[a]).rotate_right(32);
+        v[c] = blamka(v[c], v[d]);
+        v[b] = (v[b] ^ v[c]).rotate_right(24);
+        v[a] = blamka(v[a], v[b]);
+        v[d] = (v[d] ^ v[a]).rotate_right(16);
+        v[c] = blamka(v[c], v[d]);
+        v[b] = (v[b] ^ v[c]).rotate_right(63);
+    }
+
+    /// One Blake2b-style permutation in every lane: a column step, then the
+    /// diagonal step (register choice only, no data moves).
+    #[inline(always)]
+    pub(super) fn permute(v: &mut [U64x8; 16]) {
+        g(v, 0, 4, 8, 12);
+        g(v, 1, 5, 9, 13);
+        g(v, 2, 6, 10, 14);
+        g(v, 3, 7, 11, 15);
+        g(v, 0, 5, 10, 15);
+        g(v, 1, 6, 11, 12);
+        g(v, 2, 7, 8, 13);
+        g(v, 3, 4, 9, 14);
+    }
+
+    /// Transposes the even-indexed and the odd-indexed halves of `x`
+    /// separately and interleaves the results again: `y[2j + b]` lane `i`
+    /// is `x[2i + b]` lane `j`. It is its own inverse.
+    #[inline(always)]
+    pub(super) fn transpose_pairs(x: &[U64x8; 16]) -> [U64x8; 16] {
+        let even = U64x8::transpose8(from_fn(|i| x[2 * i]));
+        let odd = U64x8::transpose8(from_fn(|i| x[2 * i + 1]));
+        from_fn(|k| {
+            if k & 1 == 0 {
+                even[k >> 1]
+            } else {
+                odd[k >> 1]
+            }
+        })
     }
 }
 
@@ -320,14 +387,32 @@ mod tests {
     }
 
     #[test]
-    fn compress_simd_matches_scalar() {
+    fn compress_folded_matches_scalar_under_the_fold() {
         for seed in 0..64 {
             let (rhs, lhs) = (fill(2 * seed), fill(2 * seed + 1));
             assert_eq!(
-                Block::compress_simd(&rhs, &lhs).0,
+                Block::compress_folded(&rhs.fold(), &lhs.fold()).unfold().0,
                 Block::compress(&rhs, &lhs).0,
                 "seed {seed}"
             );
+        }
+    }
+
+    #[test]
+    fn fold_index_is_a_permutation_fixing_word_zero() {
+        let mut seen = [false; 128];
+        for w in 0..128 {
+            let s = super::fold_index(w);
+            assert!(!seen[s], "storage slot {s} reached twice");
+            seen[s] = true;
+        }
+        assert_eq!(super::fold_index(0), 0);
+        // Not the identity: a fold that changes nothing proves nothing above.
+        assert_ne!(super::fold_index(1), 1);
+        let b = fill(7);
+        assert_eq!(b.fold().unfold().0, b.0);
+        for w in 0..128 {
+            assert_eq!(b.fold().word(w), b.0[w]);
         }
     }
 }
