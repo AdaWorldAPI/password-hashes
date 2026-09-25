@@ -21,8 +21,8 @@ fn salsa20<R: Unsigned>(b: &mut [u32; 16]) {
     let mut block = [0u8; 64];
     salsa20::SalsaCore::<R>::from_raw_state(x).write_keystream_block((&mut block).into());
 
-    for (c, b) in block.chunks_exact(4).zip(x.iter_mut()) {
-        *b = u32::from_le_bytes(c.try_into().expect("4 bytes is 1 u32")).wrapping_sub(*b);
+    for (c, b) in block.as_chunks::<4>().0.iter().zip(x.iter_mut()) {
+        *b = u32::from_le_bytes(*c).wrapping_sub(*b);
     }
 
     for i in 0..16 {

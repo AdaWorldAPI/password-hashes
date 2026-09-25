@@ -239,10 +239,10 @@ where
             .transpose()?
             .unwrap_or_default();
 
-        if let Some(version) = version {
-            if version != 1 {
-                return Err(password_hash::Error::Version);
-            }
+        if let Some(version) = version
+            && version != 1
+        {
+            return Err(password_hash::Error::Version);
         }
 
         Self::new(algorithm, params, self.secret).hash_password_with_salt(password, salt)

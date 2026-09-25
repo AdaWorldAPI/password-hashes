@@ -119,7 +119,7 @@ impl Block {
 
         // Apply permutations rowwise
         let mut q = r;
-        for chunk in q.0.chunks_exact_mut(16) {
+        for chunk in q.0.as_chunks_mut::<16>().0 {
             #[rustfmt::skip]
             permute!(
                 chunk[0], chunk[1], chunk[2], chunk[3],

@@ -1,7 +1,5 @@
 //! Portable software implementation.
 
-#![allow(clippy::unwrap_used, reason = "switch to `as_chunks` when MSRV 1.88")]
-
 use salsa20::{
     SalsaCore,
     cipher::{StreamCipherCore, typenum::U4},
@@ -31,8 +29,8 @@ pub(crate) fn scrypt_block_mix(input: &[u8], output: &mut [u8]) {
 
         let mut t2 = [0u32; 16];
 
-        for (c, b) in t.chunks_exact(4).zip(t2.iter_mut()) {
-            *b = u32::from_le_bytes(c.try_into().unwrap());
+        for (c, b) in t.as_chunks::<4>().0.iter().zip(t2.iter_mut()) {
+            *b = u32::from_le_bytes(*c);
         }
 
         Salsa20_8::from_raw_state(t2).write_keystream_block((&mut x).into());

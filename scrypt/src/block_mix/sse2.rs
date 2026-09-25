@@ -1,28 +1,36 @@
-#![allow(clippy::unwrap_used, reason = "switch to `as_chunks` when MSRV 1.88")]
-
 use crate::block_mix::pivot::{INVERSE_PIVOT_ABCD, PIVOT_ABCD};
 
 pub(crate) fn shuffle_in(b: &mut [u8]) {
-    for chunk in b.chunks_exact_mut(64) {
+    for chunk in b.as_chunks_mut::<64>().0 {
         let mut t = [0u32; 16];
-        for (c, b) in chunk.chunks_exact(4).zip(t.iter_mut()) {
-            *b = u32::from_ne_bytes(c.try_into().unwrap());
+        for (c, b) in chunk.as_chunks::<4>().0.iter().zip(t.iter_mut()) {
+            *b = u32::from_ne_bytes(*c);
         }
-        chunk.chunks_exact_mut(4).enumerate().for_each(|(i, b)| {
-            b.copy_from_slice(&t[PIVOT_ABCD[i]].to_ne_bytes());
-        });
+        chunk
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| {
+                *b = t[PIVOT_ABCD[i]].to_ne_bytes();
+            });
     }
 }
 
 pub(crate) fn shuffle_out(b: &mut [u8]) {
-    for chunk in b.chunks_exact_mut(64) {
+    for chunk in b.as_chunks_mut::<64>().0 {
         let mut t = [0u32; 16];
-        for (c, b) in chunk.chunks_exact(4).zip(t.iter_mut()) {
-            *b = u32::from_ne_bytes(c.try_into().unwrap());
+        for (c, b) in chunk.as_chunks::<4>().0.iter().zip(t.iter_mut()) {
+            *b = u32::from_ne_bytes(*c);
         }
-        chunk.chunks_exact_mut(4).enumerate().for_each(|(i, b)| {
-            b.copy_from_slice(&t[INVERSE_PIVOT_ABCD[i]].to_ne_bytes());
-        });
+        chunk
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| {
+                *b = t[INVERSE_PIVOT_ABCD[i]].to_ne_bytes();
+            });
     }
 }
 

@@ -14,7 +14,7 @@ keywords = ["crypto", "hashing", "password", "phf"]
 categories = ["authentication", "cryptography", "no-std"]
 readme = "README.md"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.98.1"
 
 [dependencies]
 base64ct = "1.7"
@@ -57,7 +57,6 @@ cast_precision_loss = "warn"
 cast_sign_loss = "warn"
 checked_conversions = "warn"
 doc_markdown = "warn"
-from_iter_instead_of_collect = "warn"
 implicit_saturating_sub = "warn"
 manual_assert = "warn"
 map_unwrap_or = "warn"
