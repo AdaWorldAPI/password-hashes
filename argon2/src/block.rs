@@ -122,11 +122,25 @@ impl Block {
     /// AVX2, NEON, wasm-simd128 or scalar) is chosen at compile time by
     /// `ndarray::simd`, so this crate carries no intrinsics and no `unsafe`.
     ///
+    /// The block stays in registers from load to store. Every change of lane
+    /// is a [`U64x8::transpose8`] of eight vectors:
+    ///
+    /// - load: the block's 16 natural vectors (8 words each) become the row
+    ///   layout, `v[k]` lane `i` = word `16i + k` (2 transposes);
+    /// - row pass → column pass: `c[2r + b]` lane `i` = word `16r + 2i + b`,
+    ///   the one rendezvous the algorithm requires (2 transposes);
+    /// - store: back to row layout, then to natural order (4 transposes),
+    ///   because [`Block`] keeps its words in canonical order.
+    ///
+    /// The diagonal `G` step of each pass is only a choice of registers, so it
+    /// moves no data.
+    ///
     /// NOTE: do not call this directly. It should only be called via
     /// `Argon2::compress`.
     #[cfg(feature = "ndarray-simd")]
     #[inline(always)]
     pub(crate) fn compress_simd(rhs: &Self, lhs: &Self) -> Self {
+        use core::array::from_fn;
         use ndarray::simd::U64x8;
 
         /// `a + b + 2 * lo32(a) * lo32(b)` in every lane (RFC 9106 `fBlaMka`).
@@ -160,32 +174,43 @@ impl Block {
             g(v, 3, 4, 9, 14);
         }
 
-        /// Runs one pass: word `k` of permutation `i` lives at `q[at(i, k)]`.
+        /// Transposes the even-indexed and the odd-indexed halves of `x`
+        /// separately and interleaves the results again: `y[2j + b]` lane `i`
+        /// is `x[2i + b]` lane `j`.
         #[inline(always)]
-        fn pass(q: &mut [u64; 128], at: fn(usize, usize) -> usize) {
-            let mut v = [U64x8::splat(0); 16];
-            for (k, vk) in v.iter_mut().enumerate() {
-                let mut lanes = [0u64; 8];
-                for (i, lane) in lanes.iter_mut().enumerate() {
-                    *lane = q[at(i, k)];
-                }
-                *vk = U64x8::from_array(lanes);
-            }
-            permute(&mut v);
-            for (k, vk) in v.iter().enumerate() {
-                for (i, lane) in vk.to_array().into_iter().enumerate() {
-                    q[at(i, k)] = lane;
-                }
-            }
+        fn transpose_pairs(x: &[U64x8; 16]) -> [U64x8; 16] {
+            let even = U64x8::transpose8(from_fn(|i| x[2 * i]));
+            let odd = U64x8::transpose8(from_fn(|i| x[2 * i + 1]));
+            from_fn(|k| if k & 1 == 0 { even[k >> 1] } else { odd[k >> 1] })
         }
 
-        let r = *rhs ^ lhs;
-        let mut q = r;
-        // Row pass: permutation `i` is the 16 consecutive words of row `i`.
-        pass(&mut q.0, |i, k| 16 * i + k);
-        // Column pass: permutation `i` is column pair `2i, 2i + 1` of all rows.
-        pass(&mut q.0, |i, k| 2 * i + 16 * (k >> 1) + (k & 1));
-        q ^= &r;
+        /// Natural vector `m` of `R = rhs ^ lhs`: words `8m .. 8m + 8`.
+        let r = |m: usize| {
+            U64x8::from_slice(&rhs.0[8 * m..8 * m + 8]) ^ U64x8::from_slice(&lhs.0[8 * m..8 * m + 8])
+        };
+
+        // Row layout. Row `i` is natural vectors `2i` (words 0..8) and
+        // `2i + 1` (words 8..16), so `v[k]` lane `i` = word `16i + k`.
+        let lo = U64x8::transpose8(from_fn(|i| r(2 * i)));
+        let hi = U64x8::transpose8(from_fn(|i| r(2 * i + 1)));
+        let mut v: [U64x8; 16] = from_fn(|k| if k < 8 { lo[k] } else { hi[k - 8] });
+        permute(&mut v);
+
+        // Column layout: `c[2r + b]` lane `i` = row `r`, word `2i + b`.
+        let mut c = transpose_pairs(&v);
+        permute(&mut c);
+
+        // Back to row layout (`transpose_pairs` is its own inverse), then to
+        // natural order, and add `R` back in.
+        let v = transpose_pairs(&c);
+        let lo = U64x8::transpose8(from_fn(|k| v[k]));
+        let hi = U64x8::transpose8(from_fn(|k| v[k + 8]));
+
+        let mut q = Self::new();
+        for i in 0..8 {
+            (lo[i] ^ r(2 * i)).copy_to_slice(&mut q.0[16 * i..16 * i + 8]);
+            (hi[i] ^ r(2 * i + 1)).copy_to_slice(&mut q.0[16 * i + 8..16 * i + 16]);
+        }
         q
     }
 }
@@ -272,6 +297,37 @@ impl Drop for Blocks {
         // SAFETY: we use `dealloc` correctly with the previously allocated pointer
         unsafe {
             dealloc(self.p.as_ptr().cast(), layout);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "ndarray-simd"))]
+mod tests {
+    use super::Block;
+
+    /// SplitMix64, so the test needs no RNG dependency.
+    fn fill(seed: u64) -> Block {
+        let mut s = seed;
+        let mut b = Block::new();
+        for w in b.0.iter_mut() {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            *w = z ^ (z >> 31);
+        }
+        b
+    }
+
+    #[test]
+    fn compress_simd_matches_scalar() {
+        for seed in 0..64 {
+            let (rhs, lhs) = (fill(2 * seed), fill(2 * seed + 1));
+            assert_eq!(
+                Block::compress_simd(&rhs, &lhs).0,
+                Block::compress(&rhs, &lhs).0,
+                "seed {seed}"
+            );
         }
     }
 }
