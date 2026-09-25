@@ -4,12 +4,13 @@ use core::{
     convert::{AsMut, AsRef},
     num::Wrapping,
     ops::{BitXor, BitXorAssign},
-    slice,
 };
 
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
+// The scalar reference: under `ndarray-simd` only the parity tests reach it.
+#[cfg_attr(feature = "ndarray-simd", allow(dead_code))]
 const TRUNC: u64 = u32::MAX as u64;
 
 #[rustfmt::skip]
@@ -83,6 +84,21 @@ impl Block {
         }
     }
 
+    /// Rewrite this block's words from storage order ([`Block::stored`]) into
+    /// canonical RFC 9106 word order, for a block about to leave the crate
+    /// through a public API. A no-op without `ndarray-simd`, where the two
+    /// orders coincide.
+    #[inline]
+    pub(crate) fn canonicalize(&mut self) {
+        #[cfg(feature = "ndarray-simd")]
+        {
+            let stored = self.0;
+            for w in 0..Self::SIZE / 8 {
+                self.0[w] = stored[Self::stored(w)];
+            }
+        }
+    }
+
     /// Load a block from a block-sized byte slice (canonical word order in
     /// `input`, stored order in `self`; see [`Block::stored`]).
     #[inline(always)]
@@ -93,14 +109,10 @@ impl Block {
         }
     }
 
-    /// Iterate over the `u64` values contained in this block
-    #[inline(always)]
-    pub(crate) fn iter(&self) -> slice::Iter<'_, u64> {
-        self.0.iter()
-    }
-
     /// NOTE: do not call this directly. It should only be called via
-    /// `Argon2::compress`.
+    /// `Argon2::compress`. Under `ndarray-simd` it is the scalar reference
+    /// the parity tests hold [`Block::compress_simd`] to.
+    #[cfg_attr(feature = "ndarray-simd", allow(dead_code))]
     #[inline(always)]
     pub(crate) fn compress(rhs: &Self, lhs: &Self) -> Self {
         let r = *rhs ^ lhs;
@@ -306,7 +318,7 @@ impl Blocks {
 
     pub fn as_slice(&mut self) -> &mut [Block] {
         // SAFETY: `self.p` is a valid non-zero pointer that points to memory of the necessary size
-        unsafe { slice::from_raw_parts_mut(self.p.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.p.as_ptr(), self.len) }
     }
 }
 
@@ -327,7 +339,7 @@ impl Drop for Blocks {
 mod tests {
     use super::Block;
 
-    /// SplitMix64, so the test needs no RNG dependency.
+    /// `SplitMix64`, so the test needs no RNG dependency.
     fn fill(seed: u64) -> Block {
         let mut s = seed;
         let mut b = Block::new();
