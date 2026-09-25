@@ -532,16 +532,34 @@ impl<'key> Argon2<'key> {
                     let ref_index = ref_lane * lane_length + lane_index;
 
                     // Calculate new block
-                    let result = self.compress(
-                        memory_view.get_block(prev_index),
-                        memory_view.get_block(ref_index),
-                    );
+                    let xor_into = !(self.version == Version::V0x10 || pass == 0);
 
-                    if self.version == Version::V0x10 || pass == 0 {
-                        *memory_view.get_block_mut(cur_index) = result;
-                    } else {
-                        *memory_view.get_block_mut(cur_index) ^= &result;
-                    };
+                    // Under `ndarray-simd` the result is written straight into
+                    // the destination, fusing `cur ^ v ^ r` (see
+                    // `Block::store_tiles`). `prev_index` and `ref_index` are
+                    // never `cur_index`, so the shared reads end before the
+                    // mutable borrow starts.
+                    #[cfg(feature = "ndarray-simd")]
+                    {
+                        let (v, r) = Block::compress_simd_tiles(
+                            memory_view.get_block(prev_index),
+                            memory_view.get_block(ref_index),
+                        );
+                        Block::store_tiles(memory_view.get_block_mut(cur_index), &v, &r, xor_into);
+                    }
+
+                    #[cfg(not(feature = "ndarray-simd"))]
+                    {
+                        let result = self.compress(
+                            memory_view.get_block(prev_index),
+                            memory_view.get_block(ref_index),
+                        );
+                        if xor_into {
+                            *memory_view.get_block_mut(cur_index) ^= &result;
+                        } else {
+                            *memory_view.get_block_mut(cur_index) = result;
+                        }
+                    }
 
                     prev_index = cur_index;
                 }

@@ -176,6 +176,48 @@ impl Block {
     #[cfg(feature = "ndarray-simd")]
     #[inline(always)]
     pub(crate) fn compress_simd(rhs: &Self, lhs: &Self) -> Self {
+        let (v, r) = Self::compress_simd_tiles(rhs, lhs);
+        let mut q = Self::new();
+        Self::store_tiles(&mut q, &v, &r, false);
+        q
+    }
+
+    /// Writes the result of [`Block::compress_simd_tiles`] into `dst`:
+    /// `dst = v ^ r`, or `dst ^= v ^ r` when `xor_into` is set (Argon2 v1.3
+    /// passes after the first). Taking the destination here, instead of
+    /// returning a fresh block the caller then XORs in, puts all three
+    /// operands of `dst ^ v ^ r` in one function so the backend can fuse
+    /// them (`vpternlogq` on AVX-512) and the 1 KiB result never makes a
+    /// round trip through the stack.
+    #[cfg(feature = "ndarray-simd")]
+    #[inline(always)]
+    pub(crate) fn store_tiles(
+        dst: &mut Self,
+        v: &[ndarray::simd::U64x8; 16],
+        r: &[ndarray::simd::U64x8; 16],
+        xor_into: bool,
+    ) {
+        use ndarray::simd::U64x8;
+        for k in 0..16 {
+            let words = &mut dst.0[8 * k..8 * k + 8];
+            let out = if xor_into {
+                U64x8::from_slice(words) ^ v[k] ^ r[k]
+            } else {
+                v[k] ^ r[k]
+            };
+            out.copy_to_slice(words);
+        }
+    }
+
+    /// The register part of [`Block::compress_simd`]: returns the permuted
+    /// state `v` and the input `r = rhs ^ lhs`, both in the row (storage)
+    /// layout, so that the compressed block is `v ^ r`.
+    #[cfg(feature = "ndarray-simd")]
+    #[inline(always)]
+    pub(crate) fn compress_simd_tiles(
+        rhs: &Self,
+        lhs: &Self,
+    ) -> ([ndarray::simd::U64x8; 16], [ndarray::simd::U64x8; 16]) {
         use core::array::from_fn;
         use ndarray::simd::U64x8;
 
@@ -241,11 +283,7 @@ impl Block {
         // Back to the row layout (`transpose_pairs` is its own inverse) — which
         // is also the storage layout — and add `R` back in.
         let v = transpose_pairs(&c);
-        let mut q = Self::new();
-        for k in 0..16 {
-            (v[k] ^ r[k]).copy_to_slice(&mut q.0[8 * k..8 * k + 8]);
-        }
-        q
+        (v, r)
     }
 }
 
