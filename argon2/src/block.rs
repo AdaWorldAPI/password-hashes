@@ -10,6 +10,8 @@ use core::{
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
 
+// The scalar reference: under `ndarray-simd` only the parity tests reach it.
+#[cfg_attr(feature = "ndarray-simd", allow(dead_code))]
 const TRUNC: u64 = u32::MAX as u64;
 
 #[rustfmt::skip]
@@ -88,7 +90,7 @@ impl Block {
     /// through a public API. A no-op without `ndarray-simd`, where the two
     /// orders coincide.
     #[inline]
-    pub(crate) fn to_canonical_order(&mut self) {
+    pub(crate) fn canonicalize(&mut self) {
         #[cfg(feature = "ndarray-simd")]
         {
             let stored = self.0;
@@ -108,14 +110,10 @@ impl Block {
         }
     }
 
-    /// Iterate over the `u64` values contained in this block
-    #[inline(always)]
-    pub(crate) fn iter(&self) -> slice::Iter<'_, u64> {
-        self.0.iter()
-    }
-
     /// NOTE: do not call this directly. It should only be called via
-    /// `Argon2::compress`.
+    /// `Argon2::compress`. Under `ndarray-simd` it is the scalar reference
+    /// the parity tests hold [`Block::compress_simd`] to.
+    #[cfg_attr(feature = "ndarray-simd", allow(dead_code))]
     #[inline(always)]
     pub(crate) fn compress(rhs: &Self, lhs: &Self) -> Self {
         let r = *rhs ^ lhs;
@@ -342,7 +340,7 @@ impl Drop for Blocks {
 mod tests {
     use super::Block;
 
-    /// SplitMix64, so the test needs no RNG dependency.
+    /// `SplitMix64`, so the test needs no RNG dependency.
     fn fill(seed: u64) -> Block {
         let mut s = seed;
         let mut b = Block::new();

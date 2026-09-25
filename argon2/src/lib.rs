@@ -354,7 +354,7 @@ impl<'key> Argon2<'key> {
         // Under `ndarray-simd` blocks are stored permuted (`Block::stored`);
         // this is the one API that hands the filled blocks themselves back.
         for block in memory_blocks.as_mut() {
-            block.to_canonical_order();
+            block.canonicalize();
         }
         Ok(())
     }
@@ -541,7 +541,7 @@ impl<'key> Argon2<'key> {
         // `ndarray::simd`, so it needs no runtime CPU check here.
         #[cfg(feature = "ndarray-simd")]
         {
-            return Block::compress_simd(rhs, lhs);
+            Block::compress_simd(rhs, lhs)
         }
 
         #[cfg(not(feature = "ndarray-simd"))]
